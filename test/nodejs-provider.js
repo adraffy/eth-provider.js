@@ -6,7 +6,7 @@ function no_idle_fetch(url) {
 	return new FetchProvider({url, fetch, idle_timeout});
 }
 export const WS = new WebSocketProvider({url: 'ws://192.168.77.10:8546', WebSocket, idle_timeout});
-export const FETCH = no_idle_fetch('https://cloudflare-eth.com');
+export const FETCH = no_idle_fetch('http://192.168.77.10:8545'); //https://cloudflare-eth.com');
 export const providers = new Providers()
 	.add_static(1, WS)
 	.add_static(1, FETCH)

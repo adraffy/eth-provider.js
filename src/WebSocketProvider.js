@@ -1,14 +1,17 @@
 import {BaseProvider} from './BaseProvider.js';
 export class WebSocketProvider extends BaseProvider {
-	constructor({url, WebSocket: ws_api, source, request_timeout = 30000, idle_timeout = 60000}) {
+	constructor({url, WebSocket: ws_api, source, request_timeout = 30000, idle_timeout = 60000, options = {}}) {
 		if (typeof url !== 'string') throw new TypeError('expected url');
 		if (!ws_api) ws_api = globalThis.WebSocket;
 		if (!ws_api) throw new Error('unknown WebSocket implementation');
 		super();
 		this.url = url;
+		this.options = options;
 		this._ws_api = ws_api;
 		this._request_timeout = request_timeout;
 		this._idle_timeout = idle_timeout;
+		this._stay_connected = false;
+		this._reconnect_timer = undefined;
 		this._idle_timer = undefined;
 		this._ws = undefined;
 		this._terminate = undefined;
@@ -27,8 +30,26 @@ export class WebSocketProvider extends BaseProvider {
 		this.idle_timeout = t|0;
 		this._restart_idle();
 	}
+	connect() {
+		// this enables reconnecting
+		if (!this._stay_connected) {
+			this._stay_connected = true;
+			this._schedule_connect();
+		}
+	}
 	disconnect() {
+		// this disables reconnecting
+		this._stay_connected = false;
 		this._terminate?.(new Error('Forced disconnect'));
+	}
+	_schedule_connect() {
+		if (!this._stay_connected || this._ws) return; // disabled or already connecting
+		let t = this._last_connect;
+		let delay = 0;
+		if (t !== undefined) {
+			delay = Math.max(0, 5000 - (Date.now() - t));
+		}
+		this._reconnect_timer = setTimeout(() => this.ensure_connected().catch(() => {}), delay);
 	}
 	_restart_idle() {
 		clearTimeout(this._idle_timer);
@@ -87,8 +108,10 @@ export class WebSocketProvider extends BaseProvider {
 		} else if (_ws) { // already connected
 			return;
 		}
+		clearTimeout(this._reconnect_timer);
+		this._last_connect = Date.now();
 		const queue = this._ws = []; // change state
-		const ws = new this._ws_api(this.url); 
+		const ws = new this._ws_api(this.url, this.options); 
 		//console.log('Connecting...');
 		try {  
 			await new Promise((ful, rej) => {
@@ -109,6 +132,7 @@ export class WebSocketProvider extends BaseProvider {
 			this._terminate = undefined;
 			for (let {rej} of queue) rej(err);
 			this.emit('connect-error', err);
+			this._schedule_connect();
 			throw err;
 		}
 		//console.log('Handshaking...');
@@ -130,6 +154,7 @@ export class WebSocketProvider extends BaseProvider {
 			clearTimeout(this._idle_timer);
 			for (let {rej} of Object.values(reqs)) rej(err);
 			this.emit('disconnect', err);
+			this._schedule_connect();
 		};
 		close_handler = () => error_handler(new Error('Unexpected close'));
 		ws.addEventListener('close', close_handler);
@@ -147,9 +172,9 @@ export class WebSocketProvider extends BaseProvider {
 				clearTimeout(request.timer);
 				this._restart_idle();
 				let {result, error} = json;
-				if (result) return request.ful(result);
-				let err = new Error(error?.message ?? 'Unknown Error');
-				if ('code' in error) err.code = error.code;
+				if (!error) return request.ful(result);
+				let err = new Error(error.message);
+				err.code = error.code;
 				request.rej(err);
 			}
 		});

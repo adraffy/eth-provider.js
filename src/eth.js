@@ -1,4 +1,4 @@
-import {ABIEncoder, ABIDecoder, bytes4_from_method} from './abi.js';
+import {ABIEncoder, ABIDecoder} from './abi.js';
 
 // convenience for making an eth_call
 // return an ABIDecoder
@@ -19,10 +19,21 @@ export async function eth_call(provider, tx, enc = null, tag = 'latest') {
 		throw err;
 	}
 }
+
+// return true if the address corresponds to a contract
+export async function is_contract(provider, address) {
+	try {
+		let code = await provider.request({method: 'eth_getCode', params:[address, 'latest']});
+		return code.length > 2; // 0x...
+	} catch (err) {
+		return false;
+	}
+}
+
 // https://eips.ethereum.org/EIPS/eip-165
 export async function supports_interface(provider, contract, method) {
-	return eth_call(provider, contract, ABIEncoder.method('supportsInterface(bytes4)').bytes(bytes4_from_method(method))).then(dec => {
-		return dec.boolean();
+	return eth_call(provider, contract, ABIEncoder.method('supportsInterface(bytes4)').method(method)).then(dec => {
+		return dec.remaining > 0 && dec.boolean();
 	}).catch(err => {
 		if (err.code === -32000) return false; // TODO: implement proper fallback
 		throw err;

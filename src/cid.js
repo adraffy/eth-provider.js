@@ -36,6 +36,15 @@ export class CID {
 			throw new Error(`Malformed CID: ${cause}`, {cause});
 		}
 	}
+	upgrade_v0() {
+		return this;
+	}
+	/*
+	get version() {}
+	get codec() {}
+	get length() {}
+	get bytes() {}
+	*/
 	toJSON() {
 		return {
 			version: this.version,
@@ -85,9 +94,6 @@ export class CIDv1 extends CID {
 		pos = write_uvarint(v, this.codec, pos);
 		this.hash.write_bytes(v, pos);
 		return v;
-	}
-	upgrade_v0() {
-		return this;
 	}
 	toString(base) {
 		if (base === undefined) {

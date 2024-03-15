@@ -1,4 +1,4 @@
-import {hex_from_bytes, keccak, utf8_from_bytes} from '@adraffy/keccak';
+import {hex_from_bytes, keccak} from '@adraffy/keccak';
 import {ABIEncoder, Uint256, hex_from_method} from './abi.js';
 import {eth_call, supports_interface} from './eth.js';
 import {is_null_hex, promise_object_setter} from './utils.js';
@@ -59,7 +59,7 @@ export class ENS {
 		this.ens_normalize = ens_normalize;
 		this.registry = registry;
 		this.normalizer = undefined;
-		this._dot_eth_contract = undefined;
+		this._dot_eth = undefined;
 		this._resolvers = {};
 	}
 	normalize(name) {
@@ -149,44 +149,38 @@ export class ENS {
 			throw new Error(`Read primary failed: ${cause.message}`, {cause});
 		}
 	}
-	async get_eth_contract() {
-		if (this._dot_eth_contract !== undefined) return this._dot_eth_contract;
-		return promise_object_setter(this, '_dot_eth_contract', this.resolve('eth').then(name => name.get_owner()).then(x => x.address));
-	}
-	async is_dot_eth_available(label) {
-		return (await eth_call(
-			await this.get_provider(), 
-			await this.get_eth_contract(),
-			ABIEncoder.method('available(uint256)').number(this.labelhash(label))
-		)).boolean();
-	}
-	async get_dot_eth_owner(label) {
-		try {
-			return this.owner((await eth_call(
-				await this.get_provider(), 
-				await this.get_eth_contract(),
-				ABIEncoder.method('ownerOf(uint256)').number(this.labelhash(label))
-			)).addr());
-		} catch (err) {
-			if (err.reverted) return; // available?
-			throw err;
-		}
+	async get_dot_eth() {
+		if (this._dot_eth !== undefined) return this._dot_eth;
+		return promise_object_setter(this, '_dot_eth', this.resolve('eth').then(x => new ENSRegisterAndController(x)));
 	}
 }
+
+/*
+async get_dot_eth_controller_address() {
+	let dot_eth = await this.get_dot_eth();
+	return (await eth_call(
+		await this.get_provider(), 
+		dot_eth.resolver.address,
+		ABIEncoder.method('interfaceImplementer(bytes32,bytes4)').number(dot_eth.node).method('0x018fac06')
+	).address();
+
+}
+*/
 
 export class ENSResolver {
 	constructor(ens, address) {
 		this.ens = ens;
 		this.address = address;
 		//
-		this._interfaces = {};
+		this._interfaces = undefined;
 	}
 	async supports_interface(method) {
 		let key = hex_from_method(method);
+		if (!this._interfaces) this._interfaces = {};
 		let value = this._interfaces[key];
 		if (value !== undefined) return value;
 		return promise_object_setter(this._interfaces, key, this.ens.get_provider().then(p => {
-			return supports_interface(p, this.address, method);
+			return supports_interface(p, this.address, key);
 		}));
 	}
 	toJSON() {
@@ -601,5 +595,63 @@ export function format_addr_type(type, include_type = false) {
 		return s;
 	} else { // the type doesn't have an known name
 		return '0x' + x.toString(16).padStart(4, '0');
+	}
+}
+
+
+class ENSRegisterAndController {
+	constructor(name) {
+		this.name = name;
+		this._impls = undefined;
+	}
+	// https://docs.ens.domains/contract-api-reference/.eth-permanent-registrar#discovery
+	async address_for_interface(method) {
+		const METHOD = 'interfaceImplementer(bytes32,bytes4)';
+		let key = hex_from_method(method);
+		if (this._impls) {
+			let value = this._impls[key];
+			if (value !== undefined) return value;
+		} else {
+			if (!await this.name.resolver.supports_interface(METHOD)) {
+				throw new Error(`${this.name.name} resolver does not implement ${METHOD}`);
+			}
+		}
+		this._impls = {};
+		return promise_object_setter(this._impls, key, this.name.ens.get_provider().then(p => {
+			return eth_call(p, this.name.resolver.address, ABIEncoder.method(METHOD).number(this.name.node).method(key));
+		}).then(dec => dec.addr()));
+	}
+	async get_address() {
+		// return this.address_for_interface('0x6ccb2df4');
+		return this.name.get_owner_address();
+	}
+	async get_controller_address() {
+		return this.address_for_interface('0x018fac06');
+	}
+	async is_available(label) {
+		return (await eth_call(
+			await this.name.ens.get_provider(), 
+			await this.get_address(),
+			ABIEncoder.method('available(uint256)').number(this.name.ens.labelhash(label))
+		)).boolean();
+	}
+	async get_owner(label) {
+		try {
+			return this.name.ens.owner((await eth_call(
+				await this.name.ens.get_provider(), 
+				await this.get_address(),
+				ABIEncoder.method('ownerOf(uint256)').number(this.name.ens.labelhash(label))
+			)).addr());
+		} catch (err) {
+			if (err.reverted) return; // available?
+			throw err;
+		}
+	}
+	async get_rent_price(label, dur_sec = 31536000) { // 1-year (365*24*60*60)
+ 		return (await eth_call(
+			await this.name.ens.get_provider(),
+			await this.get_controller_address(),
+			ABIEncoder.method('rentPrice(string,uint256)').string(this.name.ens.normalize(label)).number(dur_sec)
+		)).uint256();
 	}
 }

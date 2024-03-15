@@ -65,6 +65,7 @@ export class FetchProvider extends BaseProvider {
 	_fetch(obj, ...a) {
 		return this._fetch_api(this.url, {
 			method: 'POST',
+			headers: {'Content-Type': 'application/json'},
 			body: JSON.stringify({...obj, jsonrpc: '2.0', id: ++this._id}),
 			cache: 'no-store',
 			...a
@@ -92,9 +93,9 @@ export class FetchProvider extends BaseProvider {
 		} catch (cause) {
 			throw new Error('Invalid provider response: expected json', {cause});
 		}
-		let {error} = json;
-		if (!error) return json.result;
-		let err = new Error(error.message ?? 'unknown error');
+		let {result, error} = json;
+		if (!error) return result;
+		let err = new Error(error.message);
 		err.code = error.code;
 		throw err;
 	}

@@ -2,12 +2,6 @@ import {keccak, bytes_from_hex, hex_from_bytes, bytes_from_utf8, utf8_from_bytes
 import {compare_arrays} from './utils.js';
 import {standardize_address} from './address.js';
 
-function index_mask_from_bit(i) { 
-	let index = i < 0 ? ~i : 255 - i;
-	if (index < 0 || index >= 256) throw new TypeError(`invalid bit index: ${i}`);
-	return [index >> 3, 0x80 >> (index & 7)];
-}
-
 export class Uint256 {	
 	static wrap(x) { // tries to avoid a copy
 		if (x instanceof Uint256) {
@@ -25,6 +19,16 @@ export class Uint256 {
 	static zero() {
 		return new this(new Uint8Array(32));
 	}
+	/*
+	static from_ether(x) {
+		return this.zero().set_float(x * 10**18, x);
+	}
+	*/
+	/*
+	static from_keccak(x) {
+		return new this(keccak().update(x).bytes);
+	}
+	*/
 	static from_number(i) {
 		return this.zero().set_number(i);
 	}
@@ -133,30 +137,71 @@ export class Uint256 {
 			return unsigned_from_bytes(bytes);
 		}
 	}
+	get is_zero() { return this.bytes.every(x => x == 0); }
+	get gwei() { return this.as_float(-9); }
+	get ether() { return this.as_float(-18); }
 	get unsigned() { return unsigned_from_bytes(this.bytes); }
 	get hex() { return '0x' + hex_from_bytes(this.bytes); }
 	get min_hex() { return '0x' + this.digit_str(16) } 
 	get bin() { return '0b' + this.digit_str(2); }
 	get dec() { return this.digit_str(10); }
-	digit_str(radix, lookup = '0123456789abcdefghjiklmnopqrstuvwxyz') {
-		if (radix > lookup.length) throw new RangeError(`radix larger than lookup: ${x}`);
-		return this.digits(radix).map(x => lookup[x]).join('');
+	digit_str(base, lookup = '0123456789abcdefghjiklmnopqrstuvwxyz') {
+		if (base > lookup.length) throw new RangeError(`radix larger than lookup: ${x}`);
+		return this.digits(base).map(x => lookup[x]).join('');
 	}
-	digits(radix) {
-		if (radix < 2) throw new RangeError(`radix must be 2 or more: ${radix}`);
+	digits(base) {
+		if (base < 2) throw new RangeError(`base must be 2 or more: ${base}`);
 		let digits = [0];
 		for (let x of this.bytes) {
 			for (let i = 0; i < digits.length; ++i) {
 				let xx = (digits[i] << 8) | x
-				digits[i] = xx % radix;
-				x = (xx / radix) | 0;
+				digits[i] = xx % base;
+				x = (xx / base) | 0;
 			}
 			while (x > 0) {
-				digits.push(x % radix);
-				x = (x / radix) | 0;
+				digits.push(x % base);
+				x = (x / base) | 0;
 			}
 		}
 		return digits.reverse();
+	}
+	set_digits(base, v) {
+		let u = [];
+		for (let carry of v) {
+			if (carry < 0 || carry >= base) throw new RangeError(`expected base ${base} digit: ${carry}`);
+			for (let i = 0; i < u.length; i++) {
+				carry += u[i] * base;
+				u[i] = carry;
+				carry >>= 8;
+			}
+			while (carry > 0) {
+				u.push(carry);
+				carry >>= 8;
+			}
+		}
+		let extra = u.length - 32;
+		if (extra > 0) {
+			this.bytes.set(v.slice(extra)); // truncated
+		} else {
+			this.bytes.fill(0, -extra);
+			this.bytes.set(v, 32 + extra);
+		}
+		return this;
+	}
+	set_float(x) {
+		let buf = new ArrayBuffer(8);
+		let view = new DataView(buf);
+		view.setFloat64(0, x, false);
+
+		console.log(buf);
+	}
+	as_float(exp, base = 10) {
+		let v = this.digits(base);
+		let acc = 0;
+		for (let i = 0, e = v.length - 1; i <= e; i++) {
+			acc += v[e - i] * base**(i + exp);
+		}
+		return acc;
 	}
 	toJSON() {
 		return this.min_hex;
@@ -164,6 +209,12 @@ export class Uint256 {
 	toString() {
 		return `Uint256(${this.min_hex})`;
 	}
+}
+
+function index_mask_from_bit(i) { 
+	let index = i < 0 ? ~i : 255 - i;
+	if (index < 0 || index >= 256) throw new TypeError(`invalid bit index: ${i}`);
+	return [index >> 3, 0x80 >> (index & 7)];
 }
 
 // (Uint8Array) -> Number
@@ -208,11 +259,33 @@ export function left_truncate_bytes(v, n, copy_when_same = true) {
 	return copy;
 }
 
+const METHOD_CACHE = {};
+
+export function hex_from_method(x) {
+	return /^0x[0-9a-fA-F]{8}$/.test(x) ? x : hex_from_bytes(bytes4_from_method(x));
+}
+export function bytes4_from_method(x) {
+	if (typeof x === 'string' && x.includes('(')) {
+		let v = METHOD_CACHE[x];
+		if (!v) {
+			METHOD_CACHE[x] = v = keccak().update(x).bytes.subarray(0, 4);
+		}
+		return v.slice();
+	}
+	try {
+		let v = x instanceof Uint8Array ? x : bytes_from_hex(x);
+		if (v.length != 4) throw new Error('expected 4 bytes');
+		return v;
+	} catch (err) {
+		throw new Error(`method ${x} should be a signature or 8-char hex`);
+	}
+}
+
 export class ABIDecoder {
 	static from_hex(x) { return new this(bytes_from_hex(x)); }
-	constructor(buf) {
+	constructor(buf, pos = 0) {
 		this.buf = buf;
-		this.pos = 0;
+		this.pos = pos;
 	}
 	get remaining() { return this.buf.length - this.pos; }
 	read_bytes(n) {  // THIS DOES NOT COPY
@@ -252,50 +325,23 @@ export class ABIDecoder {
 	}
 	// these all effectively copy 
 	bytes(n) { return this.read_bytes(n).slice(); }
-	boolean() { return this.number() > 0; }	
-	number(n = 32) { return unsigned_from_bytes(this.read_bytes(n)); }
-	uint256() { return new Uint256(this.bytes(32)); } 
+	boolean() { return !this.uint256().is_zero; }	
+	number(n = 32) { return this.uint256(n).unsigned; }
+	uint256(n = 32) { return Uint256.from_bytes(this.bytes(n)); } 
 	string() { return utf8_from_bytes(this.read_memory()); }	
 	memory() { return this.read_memory().slice(); }
 	addr(checksum = true) {
 		let addr = hex_from_bytes(this.read_addr_bytes());
 		return checksum ? standardize_address(addr) : `0x${addr}`; 
 	}
-	//https://github.com/multiformats/unsigned-varint
-	uvarint() { 
-		let acc = 0;
-		let scale = 1;
-		const MASK = 0x7F;
-		while (true) {
-			let next = this.read_byte();
-			acc += (next & 0x7F) * scale;
-			if (next <= MASK) break;
-			if (scale > 0x400000000000) throw new RangeException('overflow'); // Ceiling[Number.MAX_SAFE_INTEGER/128]
-			scale *= 128;
+	array(callback) {
+		let dec = new ABIDecoder(this.buf, this.number());
+		let len = dec.number();
+		let ret = [];
+		for (let i = 0; i < len; i++) {
+			ret.push(callback(dec, i));
 		}
-		return acc;
-	}
-}
-
-const METHOD_CACHE = {};
-
-export function hex_from_method(x) {
-	return /^0x[0-9a-fA-F]{8}$/.test(x) ? x : hex_from_bytes(bytes4_from_method(x));
-}
-export function bytes4_from_method(x) {
-	if (typeof x === 'string' && x.includes('(')) {
-		let v = METHOD_CACHE[x];
-		if (!v) {
-			METHOD_CACHE[x] = v = keccak().update(x).bytes.subarray(0, 4);
-		}
-		return v.slice();
-	}
-	try {
-		let v = x instanceof Uint8Array ? x : bytes_from_hex(x);
-		if (v.length != 4) throw new Error('expected 4 bytes');
-		return v;
-	} catch (err) {
-		throw new Error(`method ${x} should be a signature or 8-char hex`);
+		return ret;
 	}
 }
 
@@ -317,10 +363,19 @@ export class ABIEncoder {
 		this.pos = 0;
 		return this; // chainable
 	}
+	dump() {
+		let s = this.build_hex();
+		console.log('Method:', s.slice(0, 10));
+		s = s.slice(10);
+		while (s.length > 0) {
+			console.log(s.slice(0, 64));
+			s = s.slice(64);
+		}
+	}
 	build_hex() { return '0x' + hex_from_bytes(this.build()); }
 	build() {
 		let {pos, tails, offset} = this;
-		let len = tails.reduce((a, [_, v]) => v.length, 0);
+		let len = tails.reduce((a, [_, v]) => a + v.length, 0);
 		if (len > 0) {
 			this.alloc(len);
 			let {buf} = this;
@@ -350,7 +405,10 @@ export class ABIEncoder {
 		this.alloc((v.length + 31) & ~31).set(v);		
 		return this; // chainable
 	}
-	number(i, n = 32) {
+	number(i) {
+		this.alloc(32).set(Uint256.wrap(i).bytes);
+		return this; // chainable
+		/*
 		if (i instanceof Uint256) {
 			let buf = this.alloc(n);
 			if (n < 32) {
@@ -362,7 +420,9 @@ export class ABIEncoder {
 			set_bytes_to_number(this.alloc(n), i);
 		}
 		return this; // chainable
+		*/
 	}
+	method(x) { return this.bytes(bytes4_from_method(x)); } // chainable
 	string(s) { return this.memory(bytes_from_utf8(s)); } // chainable
 	memory(v) {
 		let {pos} = this; // remember offset
@@ -373,11 +433,25 @@ export class ABIEncoder {
 		this.tails.push([pos, tail]);
 		return this; // chainable
 	}
-	addr(s) {
+	array(v, callback) {
+		let enc = new this.constructor();
+		enc.number(v.length);
+		for (let x of v) callback(enc, x);
+		this.tails.push([this.pos, enc.build()]);
+		this.alloc(32);
+		return this;
+	}
+	addr(x) {
+		if (Array.isArray(x)) {
+			return this.array(x, (enc, s) => enc._addr(s));
+		}
+		this._addr(x);
+		return this; // chainable
+	}
+	_addr(s) {
 		let v = bytes_from_hex(s); // throws
 		if (v.length != 20) throw new TypeError('expected address');
 		this.alloc(32).set(v, 12);
-		return this; // chainable
 	}
 	// these are dangerous
 	add_hex(s) { return this.add_bytes(bytes_from_hex(s)); } // throws

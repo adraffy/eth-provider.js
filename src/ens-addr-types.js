@@ -139,7 +139,7 @@ define_ens_addr(new ENSAddrCoder(9797, 'NRG', HexCoder));
 //zcashChain('ZEL', 19167, 'za', [[0x1c, 0xb8]], [[0x1c, 0xbd]]),
 define_ens_addr(new ENSAddrCoder(42161, 'ARB1', HexCoder));
 define_ens_addr(new ENSAddrCoder(52752, 'CELO', HexCoder));
-//bitcoinBase58Chain('WICC', 99999, [[0x49]], [[0x33]]),
+define_ens_addr(new ENSAddrCoder(99999, 'WICC', new BTCCoder([[0x49]], [[0x33]])));
 //getConfig('WAN', 5718350, wanChecksummedHexEncoder, wanChecksummedHexDecoder),
 //getConfig('WAVES', 5741564, bs58EncodeNoCheck, wavesAddressDecoder),
 

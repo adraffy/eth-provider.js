@@ -48,13 +48,17 @@ console.log(await nfs.get_token_uri(1));
 */
 
 
-import {ENS, find_ens_addr} from '../index.js';
+import {ENS, is_contract, Uint256, find_ens_addr, eth_call, ABIEncoder} from '../index.js';
 import {WS as provider} from './nodejs-provider.js';
 
 
 
 
 let ens = new ENS({provider});
+
+let name = await ens.resolve('vitalik.eth');
+
+console.log(await name.get_content());
 
 /*
 
@@ -108,6 +112,7 @@ console.log([
 
 
 
+/*
 let name = await ens.resolve('brantly.eth');
 for (let key of [
 	'ETH', 'TRX', 'XEM', 'EOS', 'RSK', 
@@ -121,3 +126,20 @@ for (let key of [
 }
 
 console.log(await name.get_addrs([ "BTC", 2, "XLM", "XCH" ]));
+*/
+
+
+/*
+let dot_eth = await ens.get_dot_eth();
+
+console.log('Controller:', await dot_eth.address_for_interface('0x018fac06'));
+console.log('Registrar :', await dot_eth.address_for_interface('0x6ccb2df4'));
+
+console.log(await dot_eth.is_available('raffy'));
+console.log(await dot_eth.get_rent_price('rasdsadsaaffy', 31536000).then(x => x.ether));
+*/
+
+
+//console.log(await is_contract(provider, '0x283af0b28c62c092c9727f1ee09c02ca627eb7f5'));
+
+//console.log(await is_contract(provider, '0x51050ec063d393217B436747617aD1C2285Aeeee'));

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf8">
+<title>CID</title>
+<style>
+body {
+    margin: 20px;
+}
+#input_field {
+    width: 100%;
+    padding: 10px;
+    font-size: 16pt;
+    box-sizing: border-box;
+}
+</style>
+</head>
+<body>
+<input id="input_field">
+<pre></pre>
+<script type="module">
+import {CID} from '../dist/eth-tools-cid.min.js';
+
+const input_field = document.querySelector('#input_field');
+const output_pre = document.querySelector('pre');
+
+update();
+input_field.addEventListener('input', update);
+
+function update() {
+    try {
+        let cid = CID.from_str(input_field.value);
+        let json = cid.toJSON();
+        json.form = cid.toString();
+        if (cid.version == 0) {
+            json.upgraded = cid.upgrade_v0().toString();
+        }
+        output_pre.innerHTML = JSON.stringify(json, (_, v) => {
+            if (v instanceof Uint8Array) {
+                return '0x' + [...v].map(x => x.toString(16).padStart(2, '0')).join('');
+            }
+            return v;
+        }, 2);
+    } catch (err) {
+        output_pre.innerHTML = err.message;
+    }
+}
+
+</script>
+</body>
+</html>

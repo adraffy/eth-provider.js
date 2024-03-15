@@ -133,7 +133,8 @@ export class NFT {
 
 export function fix_multihash_uri(s) {
 	try {
-		Multihash.from_str(s);
+		let pos = indexOf(s, '/');
+		Multihash.from_str(pos >= 0 ? s.slice(0, pos) : s);
 		return `ipfs://${s}`;
 	} catch (ignored) {
 	}

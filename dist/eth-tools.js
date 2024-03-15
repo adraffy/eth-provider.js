@@ -461,6 +461,11 @@ class Uint256 {
 	static zero() {
 		return new this(new Uint8Array(32));
 	}
+	/*
+	static from_ether(x) {
+		return this.zero().set_float(x * 10**18, x);
+	}
+	*/
 	static from_number(i) {
 		return this.zero().set_number(i);
 	}
@@ -569,30 +574,74 @@ class Uint256 {
 			return unsigned_from_bytes(bytes);
 		}
 	}
+	get gwei() { return this.as_float(-9); }
+	get ether() { return this.as_float(-18); }
 	get unsigned() { return unsigned_from_bytes(this.bytes); }
 	get hex() { return '0x' + hex_from_bytes(this.bytes); }
 	get min_hex() { return '0x' + this.digit_str(16) } 
 	get bin() { return '0b' + this.digit_str(2); }
 	get dec() { return this.digit_str(10); }
-	digit_str(radix, lookup = '0123456789abcdefghjiklmnopqrstuvwxyz') {
-		if (radix > lookup.length) throw new RangeError(`radix larger than lookup: ${x}`);
-		return this.digits(radix).map(x => lookup[x]).join('');
+	digit_str(base, lookup = '0123456789abcdefghjiklmnopqrstuvwxyz') {
+		if (base > lookup.length) throw new RangeError(`radix larger than lookup: ${x}`);
+		return this.digits(base).map(x => lookup[x]).join('');
 	}
-	digits(radix) {
-		if (radix < 2) throw new RangeError(`radix must be 2 or more: ${radix}`);
+	digits(base) {
+		if (base < 2) throw new RangeError(`base must be 2 or more: ${base}`);
 		let digits = [0];
 		for (let x of this.bytes) {
 			for (let i = 0; i < digits.length; ++i) {
 				let xx = (digits[i] << 8) | x;
-				digits[i] = xx % radix;
-				x = (xx / radix) | 0;
+				digits[i] = xx % base;
+				x = (xx / base) | 0;
 			}
 			while (x > 0) {
-				digits.push(x % radix);
-				x = (x / radix) | 0;
+				digits.push(x % base);
+				x = (x / base) | 0;
 			}
 		}
 		return digits.reverse();
+	}
+	set_digits(base, v) {
+		let u = [];
+		for (let carry of v) {
+			if (carry < 0 || carry >= base) throw new RangeError(`expected base ${base} digit: ${carry}`);
+			for (let i = 0; i < u.length; i++) {
+				carry += u[i] * base;
+				u[i] = carry;
+				carry >>= 8;
+			}
+			while (carry > 0) {
+				u.push(carry);
+				carry >>= 8;
+			}
+		}
+		let extra = u.length - 32;
+		if (extra > 0) {
+			this.bytes.set(v.slice(extra)); // truncated
+		} else {
+			this.bytes.fill(0, -extra);
+			this.bytes.set(v, 32 + extra);
+		}
+		return this;
+	}
+	/*
+	set_float(x) {
+		let buf = new ArrayBuffer(8);
+		let view = new DataView(buf);
+		view.setFloat64(0, x, )		
+
+		let view = new DataView(Float64Array.of(x).buffer);
+
+
+	}
+	*/
+	as_float(exp, base = 10) {
+		let v = this.digits(base);
+		let acc = 0;
+		for (let i = 0, e = v.length - 1; i <= e; i++) {
+			acc += v[e - i] * base**(i + exp);
+		}
+		return acc;
 	}
 	toJSON() {
 		return this.min_hex;
@@ -799,6 +848,7 @@ class ABIEncoder {
 		}
 		return this; // chainable
 	}
+	method(x) { return this.bytes(bytes4_from_method(x)); } // chainable
 	string(s) { return this.memory(bytes_from_utf8(s)); } // chainable
 	memory(v) {
 		let {pos} = this; // remember offset
@@ -847,6 +897,7 @@ class Coder {
 	str() { throw new TypeError('bug: not implemented'); }
 }
 
+// callback is (s, true) to going to bytes
 class MapStringCoder extends Coder {
 	constructor(coder, fn) {
 		super();
@@ -861,6 +912,7 @@ class MapStringCoder extends Coder {
 	}
 }
 
+// callback is (v, true) if going to bytes
 class MapBytesCoder extends Coder {
 	constructor(coder, fn) {
 		super();
@@ -1245,6 +1297,15 @@ class CID {
 			throw new Error(`Malformed CID: ${cause}`, {cause});
 		}
 	}
+	upgrade_v0() {
+		return this;
+	}
+	/*
+	get version() {}
+	get codec() {}
+	get length() {}
+	get bytes() {}
+	*/
 	toJSON() {
 		return {
 			version: this.version,
@@ -1294,9 +1355,6 @@ class CIDv1 extends CID {
 		pos = write_uvarint(v, this.codec, pos);
 		this.hash.write_bytes(v, pos);
 		return v;
-	}
-	upgrade_v0() {
-		return this;
 	}
 	toString(base) {
 		if (base === undefined) {
@@ -2048,6 +2106,8 @@ class WebSocketProvider extends BaseProvider {
 		this._ws_api = ws_api;
 		this._request_timeout = request_timeout;
 		this._idle_timeout = idle_timeout;
+		this._stay_connected = false;
+		this._reconnect_timer = undefined;
 		this._idle_timer = undefined;
 		this._ws = undefined;
 		this._terminate = undefined;
@@ -2066,8 +2126,26 @@ class WebSocketProvider extends BaseProvider {
 		this.idle_timeout = t|0;
 		this._restart_idle();
 	}
+	connect() {
+		// this enables reconnecting
+		if (!this._stay_connected) {
+			this._stay_connected = true;
+			this._schedule_connect();
+		}
+	}
 	disconnect() {
+		// this disables reconnecting
+		this._stay_connected = false;
 		this._terminate?.(new Error('Forced disconnect'));
+	}
+	_schedule_connect() {
+		if (!this._stay_connected || this._ws) return; // disabled or already connecting
+		let t = this._last_connect;
+		let delay = 0;
+		if (t !== undefined) {
+			delay = Math.max(0, 5000 - (Date.now() - t));
+		}
+		this._reconnect_timer = setTimeout(() => this.ensure_connected().catch(() => {}), delay);
 	}
 	_restart_idle() {
 		clearTimeout(this._idle_timer);
@@ -2126,6 +2204,8 @@ class WebSocketProvider extends BaseProvider {
 		} else if (_ws) { // already connected
 			return;
 		}
+		clearTimeout(this._reconnect_timer);
+		this._last_connect = Date.now();
 		const queue = this._ws = []; // change state
 		const ws = new this._ws_api(this.url); 
 		//console.log('Connecting...');
@@ -2148,6 +2228,7 @@ class WebSocketProvider extends BaseProvider {
 			this._terminate = undefined;
 			for (let {rej} of queue) rej(err);
 			this.emit('connect-error', err);
+			this._schedule_connect();
 			throw err;
 		}
 		//console.log('Handshaking...');
@@ -2169,6 +2250,7 @@ class WebSocketProvider extends BaseProvider {
 			clearTimeout(this._idle_timer);
 			for (let {rej} of Object.values(reqs)) rej(err);
 			this.emit('disconnect', err);
+			this._schedule_connect();
 		};
 		close_handler = () => error_handler(new Error('Unexpected close'));
 		ws.addEventListener('close', close_handler);
@@ -2186,9 +2268,9 @@ class WebSocketProvider extends BaseProvider {
 				clearTimeout(request.timer);
 				this._restart_idle();
 				let {result, error} = json;
-				if (result) return request.ful(result);
-				let err = new Error(error?.message ?? 'Unknown Error');
-				if ('code' in error) err.code = error.code;
+				if (result !== undefined) return request.ful(result);
+				let err = new Error(error.message);
+				err.code = error.code;
 				request.rej(err);
 			}
 		});
@@ -2320,9 +2402,20 @@ async function eth_call(provider, tx, enc = null, tag = 'latest') {
 		throw err;
 	}
 }
+
+async function is_contract(provider, address) {
+	try {
+		await provider.request({method: 'eth_getCode', params:[address, 'latest']});
+		return true;
+	} catch (err) {
+		console.log(err);
+		return false;
+	}
+}
+
 // https://eips.ethereum.org/EIPS/eip-165
 async function supports_interface(provider, contract, method) {
-	return eth_call(provider, contract, ABIEncoder.method('supportsInterface(bytes4)').bytes(bytes4_from_method(method))).then(dec => {
+	return eth_call(provider, contract, ABIEncoder.method('supportsInterface(bytes4)').method(method)).then(dec => {
 		return dec.boolean();
 	}).catch(err => {
 		if (err.code === -32000) return false; // TODO: implement proper fallback
@@ -2457,7 +2550,7 @@ class ENS {
 		this.ens_normalize = ens_normalize;
 		this.registry = registry;
 		this.normalizer = undefined;
-		this._dot_eth_contract = undefined;
+		this._dot_eth = undefined;
 		this._resolvers = {};
 	}
 	normalize(name) {
@@ -2547,44 +2640,38 @@ class ENS {
 			throw new Error(`Read primary failed: ${cause.message}`, {cause});
 		}
 	}
-	async get_eth_contract() {
-		if (this._dot_eth_contract !== undefined) return this._dot_eth_contract;
-		return promise_object_setter(this, '_dot_eth_contract', this.resolve('eth').then(name => name.get_owner()).then(x => x.address));
-	}
-	async is_dot_eth_available(label) {
-		return (await eth_call(
-			await this.get_provider(), 
-			await this.get_eth_contract(),
-			ABIEncoder.method('available(uint256)').number(this.labelhash(label))
-		)).boolean();
-	}
-	async get_dot_eth_owner(label) {
-		try {
-			return this.owner((await eth_call(
-				await this.get_provider(), 
-				await this.get_eth_contract(),
-				ABIEncoder.method('ownerOf(uint256)').number(this.labelhash(label))
-			)).addr());
-		} catch (err) {
-			if (err.reverted) return; // available?
-			throw err;
-		}
+	async get_dot_eth() {
+		if (this._dot_eth !== undefined) return this._dot_eth;
+		return promise_object_setter(this, '_dot_eth', this.resolve('eth').then(x => new ENSRegisterAndController(x)));
 	}
 }
+
+/*
+async get_dot_eth_controller_address() {
+	let dot_eth = await this.get_dot_eth();
+	return (await eth_call(
+		await this.get_provider(), 
+		dot_eth.resolver.address,
+		ABIEncoder.method('interfaceImplementer(bytes32,bytes4)').number(dot_eth.node).method('0x018fac06')
+	).address();
+
+}
+*/
 
 class ENSResolver {
 	constructor(ens, address) {
 		this.ens = ens;
 		this.address = address;
 		//
-		this._interfaces = {};
+		this._interfaces = undefined;
 	}
 	async supports_interface(method) {
 		let key = hex_from_method(method);
+		if (!this._interfaces) this._interfaces = {};
 		let value = this._interfaces[key];
 		if (value !== undefined) return value;
 		return promise_object_setter(this._interfaces, key, this.ens.get_provider().then(p => {
-			return supports_interface(p, this.address, method);
+			return supports_interface(p, this.address, key);
 		}));
 	}
 	toJSON() {
@@ -3001,6 +3088,64 @@ function format_addr_type(type, include_type = false) {
 	}
 }
 
+
+class ENSRegisterAndController {
+	constructor(name) {
+		this.name = name;
+		this._impls = undefined;
+	}
+	// https://docs.ens.domains/contract-api-reference/.eth-permanent-registrar#discovery
+	async address_for_interface(method) {
+		const METHOD = 'interfaceImplementer(bytes32,bytes4)';
+		let key = hex_from_method(method);
+		if (this._impls) {
+			let value = this._impls[key];
+			if (value !== undefined) return value;
+		} else {
+			if (!await this.name.resolver.supports_interface(METHOD)) {
+				throw new Error(`${this.name.name} resolver does not implement ${METHOD}`);
+			}
+		}
+		this._impls = {};
+		return promise_object_setter(this._impls, key, this.name.ens.get_provider().then(p => {
+			return eth_call(p, this.name.resolver.address, ABIEncoder.method(METHOD).number(this.name.node).method(key));
+		}).then(dec => dec.addr()));
+	}
+	async get_address() {
+		// return this.address_for_interface('0x6ccb2df4');
+		return this.name.get_owner_address();
+	}
+	async get_controller_address() {
+		return this.address_for_interface('0x018fac06');
+	}
+	async is_available(label) {
+		return (await eth_call(
+			await this.name.ens.get_provider(), 
+			await this.get_address(),
+			ABIEncoder.method('available(uint256)').number(this.name.ens.labelhash(label))
+		)).boolean();
+	}
+	async get_owner(label) {
+		try {
+			return this.name.ens.owner((await eth_call(
+				await this.name.ens.get_provider(), 
+				await this.get_address(),
+				ABIEncoder.method('ownerOf(uint256)').number(this.name.ens.labelhash(label))
+			)).addr());
+		} catch (err) {
+			if (err.reverted) return; // available?
+			throw err;
+		}
+	}
+	async get_rent_price(label, dur_sec = 31536000) { // 1-year (365*24*60*60)
+ 		return (await eth_call(
+			await this.name.ens.get_provider(),
+			await this.get_controller_address(),
+			ABIEncoder.method('rentPrice(string,uint256)').string(this.name.ens.normalize(label)).number(dur_sec)
+		)).uint256();
+	}
+}
+
 class BTCCoder extends Coder {
 	constructor(p2pkh, p2sh) {
 		super();
@@ -3069,14 +3214,14 @@ define_ens_addr(new ENSAddrCoder(61, 'ETC', X));
 define_ens_addr(new ENSAddrCoder(77, 'XVG', new BTCCoder([[0x1E]], [[0x21]])));
 define_ens_addr(new ENSAddrCoder(105, 'STRAT', new BTCCoder([[0x3F]], [[0x7D]])));
 define_ens_addr(new ENSAddrCoder(111, 'ARK', new MapBytesCoder(X$1, v => {
-	if (v[0] != 23) throw new Error('invalid address');
+	if (v[0] != 23) throw new Error('invalid prefix');
 	return v;
 })));
 define_ens_addr(new ENSAddrCoder(118, 'ATOM', new Bech32Coder(Bech32.TYPE_1, 'cosmos')));
 define_ens_addr(new ENSAddrCoder(119, 'ZIL', new Bech32Coder(Bech32.TYPE_1, 'zil')));
 define_ens_addr(new ENSAddrCoder(120, 'EGLD', new Bech32Coder(Bech32.TYPE_1, 'erd')));
 define_ens_addr(new ENSAddrCoder(121, 'ZEN', new MapStringCoder(X$1, s => {
-	if (!/^(zn|t1|zs|t3|zc)/.test(s)) throw new Error('invalid address');
+	if (!/^(zn|t1|zs|t3|zc)/.test(s)) throw new Error('invalid prefix');
 	return s;
 })));
 //getConfig('XMR', 128, xmrAddressEncoder, xmrAddressDecoder),
@@ -3143,7 +3288,11 @@ define_ens_addr(new ENSAddrCoder(714, 'BNB', new Bech32Coder(Bech32.TYPE_1, 'bnb
 define_ens_addr(new ENSAddrCoder(820, 'CLO', X));
 //eosioChain('HIVE', 825, 'STM'),
 define_ens_addr(new ENSAddrCoder(889, 'TOMO', X));
-//getConfig('HNT', 904, hntAddresEncoder, hntAddressDecoder),
+define_ens_addr(new ENSAddrCoder(904, 'HNT', new MapBytesCoder(X$1, (v, to_b) => {
+	if (to_b) return Uint8Array.of(0, ...v);
+	if (v[0] != 0) throw new Error('invalid prefix');
+	return v.slice(1);
+})));
 define_ens_addr(new ENSAddrCoder(931, 'RUNE', new Bech32Coder(Bech32.TYPE_1, 'thor')));
 define_ens_addr(new ENSAddrCoder(999, 'BCD', new BTCCoder([[0x00]], [[0x05]]), new SegwitCoder('bcd')));
 define_ens_addr(new ENSAddrCoder(1001, 'TT', X));
@@ -3153,12 +3302,14 @@ define_ens_addr(new ENSAddrCoder(1023, 'ONE', new Bech32Coder(Bech32.TYPE_1, 'on
 //getConfig('ONT', 1024, ontAddrEncoder, ontAddrDecoder),
 //  cardanoChain('ADA', 1815, 'addr'),
 //getConfig('SC', 1991, siaAddressEncoder, siaAddressDecoder),
-//getConfig('QTUM', 2301, bs58Encode, bs58Decode),
+define_ens_addr(new ENSAddrCoder(2301, 'QTUM', X$1));
 //eosioChain('GXC', 2303, 'GXC'),
-//getConfig('ELA', 2305, bs58EncodeNoCheck, bs58DecodeNoCheck),
+define_ens_addr(new ENSAddrCoder(2305, 'ELA', Base58BTC));
 //getConfig('NAS', 2718, nasAddressEncoder, nasAddressDecoder),
 //coinType: 3030,decoder: hederaAddressDecoder,encoder: hederaAddressEncoder, name: 'HBAR',
-//iotaBech32Chain('IOTA', 4218, 'iota'),
+define_ens_addr(new ENSAddrCoder(4218, 'IOTA', new MapBytesCoder(new Bech32Coder(Bech32.TYPE_1, 'iota'), (v, to_b) => {
+	return to_b ? v.slice(1) : Uint8Array.of(0, ...v);
+})));
 //getConfig('HNS', 5353, hnsAddressEncoder, hnsAddressDecoder),
 //getConfig('STX', 5757, c32checkEncode, c32checkDecode),
 define_ens_addr(new ENSAddrCoder(6060, 'GO', X));
@@ -3170,7 +3321,7 @@ define_ens_addr(new ENSAddrCoder(9797, 'NRG', X));
 //zcashChain('ZEL', 19167, 'za', [[0x1c, 0xb8]], [[0x1c, 0xbd]]),
 define_ens_addr(new ENSAddrCoder(42161, 'ARB1', X));
 define_ens_addr(new ENSAddrCoder(52752, 'CELO', X));
-//bitcoinBase58Chain('WICC', 99999, [[0x49]], [[0x33]]),
+define_ens_addr(new ENSAddrCoder(99999, 'WICC', new BTCCoder([[0x49]], [[0x33]])));
 //getConfig('WAN', 5718350, wanChecksummedHexEncoder, wanChecksummedHexDecoder),
 //getConfig('WAVES', 5741564, bs58EncodeNoCheck, wavesAddressDecoder),
 
@@ -3320,4 +3471,4 @@ function fix_multihash_uri(s) {
 	return s;
 }
 
-export { ABIDecoder, ABIEncoder, Base10, Base16, Base2, Base32, Base32Hex, Base36, Base58BTC, X$1 as Base58Check, Base64, Base64URL, Base8, Bech32, Bech32Coder, CID, CIDv0, CIDv1, Chain, ENS, ENSAddr, ENSAddrCoder, ENSName, ENSOwner, ENSResolver, FetchProvider, NFT, NULL_ADDRESS, Providers, Segwit, SegwitCoder, Uint256, WebSocketProvider, assert_uvarint, bytes4_from_method, bytes_from_hex$1 as bytes_from_hex, bytes_from_utf8, coerce_ens_addr_type, compare_arrays, data_uri_from_json, decode_multibase, define_ens_addr, defined_chains, determine_window_provider, encode_multibase, ensure_chain, eth_call, find_chain, find_ens_addr, fix_multihash_uri, format_addr_type, hex_from_bytes, hex_from_method, is_checksum_address, is_null_hex, is_valid_address, keccak, labelhash, labels_from_name, left_truncate_bytes, make_smart, namehash, parse_avatar, parse_content, promise_object_setter, read_uvarint, replace_ipfs_protocol, set_bytes_to_number, sha256, sha3, shake, short_address, sizeof_uvarint, standardize_address, standardize_chain_id, supports_interface, unsigned_from_bytes, utf8_from_bytes, write_uvarint };
+export { ABIDecoder, ABIEncoder, Base10, Base16, Base2, Base32, Base32Hex, Base36, Base58BTC, X$1 as Base58Check, Base64, Base64URL, Base8, Bech32, Bech32Coder, CID, CIDv0, CIDv1, Chain, ENS, ENSAddr, ENSAddrCoder, ENSName, ENSOwner, ENSResolver, FetchProvider, NFT, NULL_ADDRESS, Providers, Segwit, SegwitCoder, Uint256, WebSocketProvider, assert_uvarint, bytes4_from_method, bytes_from_hex$1 as bytes_from_hex, bytes_from_utf8, coerce_ens_addr_type, compare_arrays, data_uri_from_json, decode_multibase, define_ens_addr, defined_chains, determine_window_provider, encode_multibase, ensure_chain, eth_call, find_chain, find_ens_addr, fix_multihash_uri, format_addr_type, hex_from_bytes, hex_from_method, is_checksum_address, is_contract, is_null_hex, is_valid_address, keccak, labelhash, labels_from_name, left_truncate_bytes, make_smart, namehash, parse_avatar, parse_content, promise_object_setter, read_uvarint, replace_ipfs_protocol, set_bytes_to_number, sha256, sha3, shake, short_address, sizeof_uvarint, standardize_address, standardize_chain_id, supports_interface, unsigned_from_bytes, utf8_from_bytes, write_uvarint };

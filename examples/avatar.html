@@ -216,10 +216,10 @@ Examples:
 <script type="module">
 import {
 	WebSocketProvider, FetchProvider, Providers, 
-	determine_window_provider,
+	determine_window_provider, fix_multihash_uri,
 	ENS, parse_avatar, hex_from_bytes
-} from '../dist/eth-tools.min.js';
-import {ens_normalize} from '../../ens-normalize.js/dist/ens-normalize.min.js';
+} from '../dist/eth-tools.js';
+import {ens_normalize} from '../../ens-normalize.js/dist/index.min.js';
 
 const providers = new Providers()
 	.add_static(1, new WebSocketProvider({url: 'wss://mainnet.infura.io/ws/v3/f36f6a8638134ac09f9400d3a7008dfe'}))
@@ -307,19 +307,6 @@ function replace_ipfs(uri) {
 	return uri.replace(/^ipfs:\/\//, 'https://ipfs.io/ipfs/');
 }
 
-
-function fix_uri(uri, context) {
-	let url = replace_ipfs(uri);
-	/*
-	if (url.includes('/ipfs/ipfs/')) {
-		let fixed = url.replaceAll('/ipfs/ipfs/', '/ipfs/');
-		output.append(create_error(`<b>${context} URI</b>: <a href="${url}}">${uri}</a> is likely wrong, using <a href="${fixed}">this</a> instead.`));
-		url = fixed;
-	}
-	*/
-	return url;
-}
-
 function create_avatar_row() {
 	let avatar = document.createElement('div');
 	avatar.classList.add('avatar');
@@ -331,11 +318,12 @@ function create_avatar_row() {
 }
 
 function load_image_into(parent, uri) {
-	let http = fix_uri(uri, 'Avatar');
+	let fixed = fix_multihash_uri(uri);
+	let http = replace_ipfs(fixed);
 
 	let a = document.createElement('a');
 	a.href = http;
-	a.title = uri;
+	a.title = fixed;
 	a.innerHTML = uri;
 	a.classList.add('wrapped');
 	parent.append(a);
@@ -491,9 +479,10 @@ async function resolve0(output, input) {
 			} else {
 				promises.push((async () => {
 					let res;
-					let meta_url = fix_uri(meta_uri, 'Metadata');
+					let fixed = fix_multihash_uri(meta_uri);
+					let meta_url = replace_ipfs(fixed);
 					try {
-						res = await fetch(meta_url, {headers: {Origin: 'anonymous'}});
+						res = await fetch(meta_url, {headers: {Origin: 'null'}});
 					} catch (err) {
 						let error = create_error('<b>Metadata blocked by CORS</b>');
 						//row.insertAdjacentElement('afterend', error);
@@ -656,7 +645,7 @@ async function resolve0(output, input) {
 				div.append(a);
 			} else {
 				let pre = document.createElement('pre');
-				pre.innerHTML = [...hash].map(x = x.toString(16).padStart(2, '0')).join(' ');
+				pre.innerHTML = [...hash].map(x => x.toString(16).padStart(2, '0')).join(' ');
 				div.append(pre);
 			}
 			output.append(div);
